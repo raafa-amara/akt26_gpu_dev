@@ -1,4 +1,3 @@
-
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 
@@ -12,9 +11,23 @@
 // Custom rank-1 update kernel
 // A <- A + alpha * x * y^T
 // Column-major storage: A(i,j) = A[j*m + i]
+//
+// Strategy: one thread updates exactly one entry A(i,j).
+//   - threadIdx.x / blockIdx.x walk along the ROWS    (index i, 0..m-1)
+//   - threadIdx.y / blockIdx.y walk along the COLUMNS (index j, 0..n-1)
+// Because the matrix is column-major, entries with consecutive i are
+// consecutive in memory, so the 32 threads of a warp (consecutive
+// threadIdx.x) touch 32 consecutive floats -> coalesced memory access.
 __global__ void ger_kernel(int m, int n, float alpha, const float* x, const float* y, float* A)
 {
-    // TODO: write your CUDA kernel here
+    // global row index and global column index of this thread
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // the grid is rounded up, so some threads fall outside the matrix
+    if (i < m && j < n) {
+        A[(size_t)j * m + i] += alpha * x[i] * y[j];
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -105,11 +118,14 @@ int main(int argc, char** argv)
                 m, n, alpha, repeats);
     std::printf("Matrix storage: column-major\n\n");
 
-    // n1000: configure your kernel here
-    // TODO: the configuration below is a default that you must change
-    dim3 block(16, 16, 1);
-    dim3 grid( 1, 1, 1);
-    // end of TODO: kernel configuration
+    // Block: 32 x 8 = 256 threads. The 32 along x is one full warp that
+    // walks down a column (contiguous memory -> coalesced).
+    // Grid: enough blocks to cover the whole m x n matrix (round up).
+    const int threads_x = 32;
+    const int threads_y = 8;
+    dim3 block(threads_x, threads_y, 1);
+    dim3 grid( (m + threads_x - 1) / threads_x,
+               (n + threads_y - 1) / threads_y, 1);
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
